@@ -1,0 +1,98 @@
+""" 
+core_test.py — Opção B (incêndio) com Google Earth Engine (Python API)
+Objetivo: calcular NBR_pre, NBR_post, dNBR, máscara de queimado e área ardida (ha)
+Sem QGIS / sem UI.
+
+Requisitos:
+- earthengine-api (import ee)
+Execução:
+- python core_test.py
+"""
+
+import ee
+
+# ---------- 1) Autenticação e inicialização ----------
+def gee_init():
+    try:
+        ee.Initialize()
+    except Exception:
+        # Primeira vez (ou credenciais ausentes) -> autenticar
+        ee.Authenticate()
+        ee.Initialize()
+
+gee_init()
+
+# ---------- 2) AOI (Monchique - bbox simples) ----------
+# BBOX aproximada em WGS84 (lon, lat). Ajusta se quiseres.
+# (minLon, minLat, maxLon, maxLat)
+aoi = ee.Geometry.Rectangle([-8.75, 37.15, -8.25, 37.45], proj="EPSG:4326", geodesic=False)
+
+# ---------- 3) Datas (Monchique 2018) ----------
+pre_start, pre_end = "2018-06-15", "2018-08-02"
+post_start, post_end = "2018-08-11", "2018-10-15"
+
+# ---------- 4) Funções: máscara nuvens (SCL) + NBR ----------
+def mask_s2_scl(img: ee.Image) -> ee.Image:
+    # COPERNICUS/S2_SR_HARMONIZED: SCL classes comuns
+    # Mantém: 4 Vegetation, 5 Bare soils, 6 Water, 7 Unclassified, 11 Snow/ice (raramente em PT)
+    scl = img.select("SCL")
+    good = (scl.eq(4)
+            .Or(scl.eq(5))
+            .Or(scl.eq(6))
+            .Or(scl.eq(7))
+            .Or(scl.eq(11)))
+    # SR vem escalado por 10000
+    return img.updateMask(good).divide(10000)
+
+def add_nbr(img: ee.Image) -> ee.Image:
+    # NBR = (NIR - SWIR2) / (NIR + SWIR2)
+    # Sentinel-2: NIR=B8, SWIR2=B12
+    nbr = img.normalizedDifference(["B8", "B12"]).rename("NBR")
+    return img.addBands(nbr)
+
+def nbr_composite(start: str, end: str) -> ee.Image:
+    col = (ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+           .filterBounds(aoi)
+           .filterDate(start, end)
+           .filter(ee.Filter.lte("CLOUDY_PIXEL_PERCENTAGE", 60))
+           .map(mask_s2_scl)
+           .map(add_nbr))
+    nbr = col.select("NBR").median().clip(aoi)
+    return nbr, col.size()
+
+# ---------- 5) Processamento ----------
+nbr_pre, n_pre = nbr_composite(pre_start, pre_end)
+nbr_post, n_post = nbr_composite(post_start, post_end)
+
+dnbr = nbr_pre.subtract(nbr_post).rename("dNBR")
+
+threshold = 0.27
+burned = dnbr.gt(threshold).selfMask().rename("burned")
+
+# Área ardida (ha) dentro da AOI
+area_m2 = (burned.multiply(ee.Image.pixelArea())
+           .reduceRegion(
+               reducer=ee.Reducer.sum(),
+               geometry=aoi,
+               scale=20,        # 20 m é apropriado para B12 (SWIR2)
+               maxPixels=1e13
+           )
+           .getNumber("burned"))
+
+area_ha = area_m2.divide(10000)
+
+# ---------- 6) Output ----------
+print("=== Core test (Monchique 2018) ===")
+print("Pre window:", pre_start, "to", pre_end, "| images:", n_pre.getInfo())
+print("Post window:", post_start, "to", post_end, "| images:", n_post.getInfo())
+print("Threshold dNBR:", threshold)
+print("Burned area (ha):", float(area_ha.getInfo()))
+
+# (Opcional) estatísticas rápidas do dNBR
+dnbr_stats = dnbr.reduceRegion(
+    reducer=ee.Reducer.minMax(),
+    geometry=aoi,
+    scale=20,
+    maxPixels=1e13
+).getInfo()
+print("dNBR min/max:", dnbr_stats)
