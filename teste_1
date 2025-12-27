@@ -1,4 +1,4 @@
-""" 
+"""
 core_test.py — Opção B (incêndio) com Google Earth Engine (Python API)
 Objetivo: calcular NBR_pre, NBR_post, dNBR, máscara de queimado e área ardida (ha)
 Sem QGIS / sem UI.
@@ -9,16 +9,23 @@ Execução:
 - python core_test.py
 """
 
+
 import ee
+import geemap
+import requests
+from io import BytesIO
+from PIL import Image
+import matplotlib.pyplot as plt
+
 
 # ---------- 1) Autenticação e inicialização ----------
 def gee_init():
     try:
-        ee.Initialize()
+        ee.Initialize(project='ee-vascosilvagames11')
     except Exception:
         # Primeira vez (ou credenciais ausentes) -> autenticar
         ee.Authenticate()
-        ee.Initialize()
+        ee.Initialize(project='ee-vascosilvagames11')
 
 gee_init()
 
@@ -96,3 +103,48 @@ dnbr_stats = dnbr.reduceRegion(
     maxPixels=1e13
 ).getInfo()
 print("dNBR min/max:", dnbr_stats)
+
+
+
+# ---------- 5) Gerar thumbnails (PNG) e mostrar ----------
+def fetch_thumb_png(image: ee.Image, region: ee.Geometry, vis: dict, dims: int = 900) -> Image.Image:
+    url = image.getThumbURL({
+        "region": region,
+        "dimensions": dims,
+        "crs": "EPSG:4326",
+        "format": "png",
+        "min": vis.get("min"),
+        "max": vis.get("max"),
+        "palette": vis.get("palette"),
+    })
+    r = requests.get(url, timeout=120)
+    r.raise_for_status()
+    return Image.open(BytesIO(r.content)).convert("RGBA")
+
+# Paletas: simples e legíveis
+vis_dnbr = {
+    "min": -0.2,
+    "max": 1.0,
+    "palette": ["ffffff", "fff200", "ff8c00", "ff0000"],  # branco -> amarelo -> laranja -> vermelho
+}
+vis_burned = {
+    "min": 0,
+    "max": 1,
+    "palette": ["ff0000"],  # vermelho
+}
+
+img_dnbr = fetch_thumb_png(dnbr, aoi, vis_dnbr)
+img_burned = fetch_thumb_png(burned, aoi, vis_burned)
+
+plt.figure()
+plt.title("dNBR (Monchique 2018)")
+plt.imshow(img_dnbr)
+plt.axis("off")
+plt.show()
+
+plt.figure()
+plt.title(f"Burned mask (dNBR > {threshold})")
+plt.imshow(img_burned)
+plt.axis("off")
+plt.show()
+
